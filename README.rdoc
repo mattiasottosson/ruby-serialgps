@@ -1,27 +1,30 @@
 = Ruby GPSSerial
-This library provides an easy way to get GPS data from your serial GPS unit. 
+This library provides an easy way to get GPS data from your serial GPS unit.
+Forked from jgillick-ruby-serialgps
 
 == Description
 Uses ruby-serialport to connect to a standard serial GPS unit and parses the NMEA sentences into an easy to use hash.
 
 === NMEA Sentences
 Currently it only parses the following NMEA sentences:
-* $GPGGA
-* $GPRMC
-* $GPGLL
-* $GPRMA
-* $GPGSA
-* $GPGSV
-* $GPHDT
-* $GPZDA
+* $GPGGA # Global Positioning Fix
+* $GPGLL # Geographic position Latitude/Longitude
+* $GPGSA # GPS DOP and active satellites (up to 12)
+* $GPGSV # multiple lines: GPS Satellites in view
+* $GPHDT # Heading True
+* $GPZDA # Date and Time
+* $GPRMA # Recommended Minimum Loran-C
+* $GPRMB # Recommended minimum navigation info
+* $GPRMC # Recommended Minimum specific GPS/Transit
+* $GPRME # Estimated Position Error
+* $GPRMM # Map datum (Coordinate System)
+* $GPRMZ # Altitude in feet, possibly pressure based
+* $GPBOD # Bearing, origin to destination
 
 === GPS Data Hash
-Calling <code>read</code> or <code>get_data</code> will return a hash with some or all of the keys listed below. Each time
-you call one of those methods, more NMEA sentences will be parsed and added to the hash. 
+Calling <code>read</code>  will return a hash with some or all of the keys listed below. Each time
+you call one of those methods, more NMEA sentences will be parsed and added to the hash.
 You may have to call <code>read</code> multiple times in a loop until your data is available.
-
-<code>get_data</code> is a wrapper function that will call <code>read</code> in a loop until <em>at least</em> the $GPGGA and $GPRMC 
-sentences are read.
 
 last_nmea::  			The last NMEA sentence name (without "$GP") parsed with the read method.
 quality::				0 = invalid, 1 = GPS fix, 2 = DGPS fix
@@ -37,10 +40,11 @@ heading::				Heading, in degrees
 course::				Course over ground in degrees
 time::					Current time formated as HHMMSS.SS -- use date_time to get the parsed version
 date::					Current date formated as DDMMYY -- use date_time to get the parsed version
-local_hour_offset::		Local zone description, 00 to +/- 13 hours 
-local_minute_offset::	Local zone minutes description (same sign as hours) 
+local_hour_offset::		Local zone description, 00 to +/- 13 hours
+local_minute_offset::	Local zone minutes description (same sign as hours)
 num_sat::				The number of satellites in view
-satellites::			An array with id, elevation, azimuth and SNR for each satellite
+active_satellites::			An array holding id's of upto 12 active satellites (use as keys to visible_satellites)
+visible_satellites::	A hash, indexed by id, elevation, azimuth and SNR for each satellite
 height_geoid::			Height of geoid above WGS84 ellipsoid
 height_geoid_unit::		Unit of measure (i.e. M = Meters)
 last_dgps::				Time since last DGPS update
@@ -64,10 +68,10 @@ Time:
 Date:
  DDMMYY
 
-Instead of parsing these yourself, the <code>date_time</code> method will convert 
+Instead of parsing these yourself, the <code>date_time</code> method will convert
 these strings into a DateTime object with the timezone set to UTC.
  require "serialgps"
-	
+
  gps = SerialGPS.new("/dev/ttyUSB0")
 
  ...
@@ -79,20 +83,17 @@ these strings into a DateTime object with the timezone set to UTC.
 === Remotely
 You need RubyGems 1.2.0 to install it remotely from the GitHub repository.
 
-  gem sources -a http://gems.github.com
-  gem install jgillick-ruby-serialgps
-  
+
 === Locally
 After downloading ruby-serialgps.gem
 
-   gem install ruby-serialgps.gem
-  
+
 == Examples
-Here's a simple example of 
+Here's a simple example of
 
 === Simple GPS dump
 This uses the internal live_gps_dump method to show live GPS data in the console
-	
+
  require "rubygems"
  require "serialgps"
 
@@ -117,7 +118,3 @@ A program that prints latitude and longitude data to the console as soon as it's
        puts "Longitude: #{data[:longitude]}#{data[:long_ref]}\n"
     end
  end
-
-
-
-
