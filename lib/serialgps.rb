@@ -92,6 +92,11 @@ class SerialGPS
 		@data = {}
 		@data[:latitude] = 0
 		@data[:longitude] = 0
+		@data[:number_coordinates] = 0
+		@data[:sum_latitude] = 0
+		@data[:sum_longitude] = 0
+
+		@log_fd = File.open('/tmp/gps.log', 'w')
 
 	end
 
@@ -115,6 +120,23 @@ class SerialGPS
 					if k == :visible_satellites
 						v_old.merge!(v_new)
 						v_old
+					elsif k == :longitude
+						if data[:quality] == "1"
+							@data[:sum_longitude] += v_new
+							v_new
+						else
+							v_old
+						end
+					elsif k == :latitude
+						if data[:quality] == "1"
+							@data[:sum_latitude] += v_new
+							@data[:number_coordinates] += 1
+							@log_fd.puts "#{data[:longitude]}\t#{data[:latitude]}\t#{data[:altitude]}"
+							@log_fd.flush
+							v_new
+						else
+							v_old
+						end
 					else
 						v_new
 					end
@@ -174,13 +196,9 @@ class SerialGPS
 	#Given the antenna's known coordinates, return the track and distance
 	#to the last GPS coordinates.
 	# @param antenna [Vincenty]
-	def actual_error(antenna)
-		return 0 if @data[:latitude] == nil || @data[:longitude] == nil
+	def actual_error(antenna_location, gps_location)
 		begin
-			latitude = @data[:latitude] * (@data[:lat_ref] == 'N' ? 1:-1)
-			longitude = @data[:longitude] * (@data[:long_ref] == 'E' ? 1:-1)
-			gps_location = Vincenty.new(latitude, longitude)
-			antenna.distanceAndAngle(gps_location)
+			antenna_location.distanceAndAngle(gps_location)
 		rescue Exception => error
 			puts "Actual_error(): #{error}"
 			return 0
@@ -196,7 +214,6 @@ class SerialGPS
 		data = {}
 		rows = 1
 		errors = 0
-
 		while true do
 			begin
 				read
@@ -217,18 +234,30 @@ class SerialGPS
 
 				num_sat = @data[:num_sat] || 0
 				$stdout.print "UTC: #{date}   Active Satellites: #{num_sat} of #{@data[:num_sat_in_view]}   #{@data[:mode_dimension]}D\n"
-				$stdout.print "Latitude: #{@data[:latitude] * (@data[:lat_ref] == 'N' ? 1:-1)}"
-				$stdout.print "\tLongitude: #{@data[:longitude] * (@data[:long_ref] == 'E' ? 1:-1)}"
+				$stdout.print "Latitude:        #{@data[:latitude]}"
+				$stdout.print "\tLongitude: #{@data[:longitude]}"
 				$stdout.print " +/-#{@data[:horizontal_error]}#{@data[:horizontal_error_units]}\n"
+				if @data[:number_coordinates] > 0
+					gps_location = Vincenty.new(@data[:latitude], @data[:longitude])
+					latitude_avg = @data[:sum_latitude]/@data[:number_coordinates]
+					longitude_avg = @data[:sum_longitude]/@data[:number_coordinates]
+					$stdout.print "Average Latitude: #{latitude_avg}\tLongitude #{longitude_avg}\tCount #{@data[:number_coordinates]}\n"
+					rows += 1
+					if known_antenna_location != nil
+						average_gps = Vincenty.new(latitude_avg,longitude_avg)
+					  $stdout.print "track to Antenna: #{actual_error(average_gps, known_antenna_location)}"
+						$stdout.print "\tto GPS #{ actual_error( average_gps, gps_location ) }\n"
+						rows += 1
+					end
+				end
 				if known_antenna_location != nil
-					$stdout.print "Actual error: #{actual_error(known_antenna_location)}\n"
+					$stdout.print "Actual error: #{actual_error(known_antenna_location, gps_location)}\n"
 					rows += 1
 				end
 =begin
-				$stdout.print "Latitude: #{@data[:rmc_latitude]}#{@data[:rmc_lat_ref]}"
-				$stdout.print "\tLongitude: #{@data[:rmc_longitude]}#{@data[:rmc_long_ref]} RMC: #{@data[:rmc_time]}\n"
-				$stdout.print "Latitude: #{@data[:gll_latitude]}#{@data[:gll_lat_ref]}"
-				$stdout.print "\tLongitude: #{@data[:gll_longitude]}#{@data[:gll_long_ref]} GLL: #{@data[:gll_time]}\n"
+				$stdout.print "Latitude: #{@data[:rmc_latitude]}}\tLongitude: #{@data[:rmc_longitude]} RMC: #{@data[:rmc_time]}\n"
+				$stdout.print "Latitude: #{@data[:gll_latitude]}\tLongitude: #{@data[:gll_longitude]} GLL: #{@data[:gll_time]}\n"
+				rows += 2
 =end
 				$stdout.print "Elevation: #{@data[:altitude]}#{@data[:alt_unit]}"
 				$stdout.print " +/-#{@data[:altitude_error]}#{@data[:altitude_error_units]}"
@@ -266,8 +295,8 @@ class SerialGPS
 					$stdout.print "\e[1A\e[E\e[J"
 					errors = 0
 				end
-
-				$stdout.print "\nERROR: #{e.message}\n"
+				backtrace = e.backtrace[0].split(":")
+				$stdout.print "\nERROR (#{File.basename(backtrace[-3])} #{backtrace[-2]}): #{e.message}\n"
 				break
 			end
 
@@ -293,7 +322,7 @@ class SerialGPS
 	end
 
 	# Convert a Lat or Long NMEA coordinate to decimal
-	def latLngToDecimal(coord)
+	def latLngToDecimal(coord, direction = 'N')
 		coord = coord.to_s
 		decimal = nil
 		negative = (coord.to_i < 0)
@@ -310,7 +339,7 @@ class SerialGPS
 			end
 		end
 
-		decimal
+		decimal * (direction == 'N' || direction == 'E' ? 1 : -1)
 	end
 
 	# Parse a raw NMEA sentence and respond with the data in a hash
@@ -344,17 +373,19 @@ class SerialGPS
 			when "GGA" # Global Positioning Fix
 				data[:last_nmea] = type
 				data[:time]				= line.shift                   #002909 HHMMSS UTC
-				data[:latitude]			= latLngToDecimal(line.shift)  #3659.418 36Deg 59.418Minutes
-				data[:lat_ref]			= line.shift                   #S South
-				data[:longitude]		= latLngToDecimal(line.shift)  #17429.240 174deg 29.240min
-				data[:long_ref]			= line.shift                   #E East
+				latitude = line.shift                            #3659.418 36Deg 59.418Minutes
+				direction = line.shift  												 #S South
+				data[:latitude]			= latLngToDecimal(latitude, direction)
+				longitude = line.shift                            #17429.240 174deg 29.240min
+				direction = line.shift  													#E East
+				data[:longitude]		= latLngToDecimal(longitude, direction)
 				data[:quality]			= line.shift                   #1 0=Invalid,1=GPS,2=DGPS
 				data[:num_sat]			= line.shift.to_i              #6 Six satellites active
-				data[:hdop]				= line.shift                   #1.5 Horizontal accuracy
+				data[:hdop]				= line.shift                    #1.5 Horizontal accuracy
 				data[:altitude]			= line.shift                   #165.3 Altitude
 				data[:alt_unit]			= line.shift                   #M Meters
-				data[:height_geoid]		= line.shift                   #28.0 height of geoid above WGS84 ellipsod
-				data[:height_geoid_unit] = line.shift                  #M meters
+				data[:height_geoid]		= line.shift                 #28.0 height of geoid above WGS84 ellipsod
+				data[:height_geoid_unit] = line.shift              #M meters
 				data[:last_dgps]		= line.shift                   # Time since last DGPS update
 				data[:dgps]				= line.shift                   # DGPS Reference station ID
 				                                                       #*5F Checksum
@@ -362,22 +393,26 @@ class SerialGPS
 			#$GPGLL,3659.418,S,17429.240,E,002910,A*36
 			when "GLL" # Geographic position Latitude/Longitude
 				data[:last_nmea] 	= type
-				data[:gll_latitude]		= latLngToDecimal(line.shift) #3659.418 (36deg 59.418min)
-				data[:gll_lat_ref]		= line.shift                  #S (South)
-				data[:gll_longitude]	= latLngToDecimal(line.shift) #17429.240 (174deg 29.240min)
-				data[:gll_long_ref]		= line.shift                  #E (East)
+				latitude = line.shift                            #3659.418 (36deg 59.418min)
+				direction = line.shift  												 #S South
+				data[:gll_latitude]			= latLngToDecimal(latitude, direction)
+				longitude = line.shift                            #17429.240 174deg 29.240min
+				direction = line.shift  													#E East
+				data[:gll_longitude]		= latLngToDecimal(longitude, direction)
 				data[:gll_time]			= line.shift                  #002910 (Time 00:29:10 UTC)
 				data[:gll_validity]		= line.shift                #A A=OK, V=Warning
 				                                                  #*36 Checksum
 
-			#eg $GPRMA,A,llll.ll,N,lllll.ll,W,,,ss.s,ccc,vv.v,W*hh
+			#eg $GPRMA,A,3659.418,S,17429.240,E,,,ss.s,ccc,vv.v,W*hh
 			when "RMA" #Recommended Minimum Loran-C
 				data[:last_nmea] = type
 				data[:rma_validity]		= line.shift                #A A=OK, V=Warning
-				data[:rma_latitude]		= latLngToDecimal(line.shift)  #Latitude
-				data[:rma_lat_ref]		= line.shift                   #N/S
-				data[:rma_longitude]	= latLngToDecimal(line.shift)  #Longitude
-				data[:rma_long_ref]		= line.shift                   #E/W
+				latitude = line.shift                            #3659.418 (36deg 59.418min)
+				direction = line.shift  												 #S South
+				data[:rma_latitude]			= latLngToDecimal(latitude, direction)
+				longitude = line.shift                            #17429.240 174deg 29.240min
+				direction = line.shift  													#E East
+				data[:rma_longitude]		= latLngToDecimal(longitude, direction)
 				line.shift                                         # not used
 				line.shift                                         # not used
 				data[:rma_speed]			= line.shift               # Ground Speed Knots
@@ -393,10 +428,12 @@ class SerialGPS
         data[:rmb_steer_to]       = line.shift                 #L            steer Left to correct (or R = right)
         data[:rmb_origin]		      = line.shift                  #T001         Origin waypoint ID
         data[:rmb_destination]		= line.shift                  #B1           Destination waypoint ID
-				data[:rmb_dest_latitude]	= latLngToDecimal(line.shift) #3659.509,S   Destination waypoint latitude 36 deg. 59.509 min
-				data[:rmb_dest_lat_ref]		= line.shift                  #S (South)
-				data[:rmb_dest_longitude]	= latLngToDecimal(line.shift) 	#17429.158,E  Destination waypoint longitude 174 deg. 29.158 min.
-				data[:rmb_dest_long_ref]	= line.shift                  #E (East)
+				latitude = line.shift                            #3659.418 (36deg 59.418min)
+				direction = line.shift  												 #S South
+				data[:rmb_dest_latitude]	= latLngToDecimal(latitude, direction) #Destination waypoint latitude
+				longitude = line.shift                            #17429.240 174deg 29.240min
+				direction = line.shift  													#E East
+				data[:rmb_dest_longitude]	= latLngToDecimal(longitude, direction) 	#Destination waypoint longitude
         data[:rmb_dest_distance]	= line.shift                  #000.1        Range to destination, nautical miles
         data[:rmb_dest_bearing]		= line.shift                  #215.9        True bearing to destination
         data[:rmb_speed]		      = line.shift                  #             Velocity towards destination, knots
@@ -408,10 +445,12 @@ class SerialGPS
 				data[:last_nmea] = type
 				data[:rmc_time]			= line.shift                  #002909 Time of Fix HHMMSS UTC
 				data[:rmc_validity]		= line.shift                  #A A=OK, V=Warning
-				data[:rmc_latitude]		= latLngToDecimal(line.shift) #3659.418 36Deg 59.418Minutes
-				data[:rmc_lat_ref]		= line.shift                  #S (South)
-				data[:rmc_longitude]	= latLngToDecimal(line.shift) #17429.240 174deg 29.240min
-				data[:rmc_long_ref]		= line.shift                  #E (East)
+				latitude = line.shift                            #3659.418 (36deg 59.418min)
+				direction = line.shift  												 #S South
+				data[:rmc_latitude]		= latLngToDecimal(latitude, direction) #3659.418 36Deg 59.418Minutes
+				longitude = line.shift                            #17429.240 174deg 29.240min
+				direction = line.shift  													#E East
+				data[:rmc_longitude]	= latLngToDecimal(longitude, direction) #17429.240 174deg 29.240min
 				data[:rmc_speed]		= line.shift                  #000.0 Speed in Knots
 				data[:rmc_course]		= line.shift                  #360.0 Course Made Good, True
 				data[:rmc_date]			= line.shift                  #201116 Date 20th Nov 2016
